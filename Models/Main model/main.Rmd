@@ -1,0 +1,601 @@
+---
+title: "final_clean"
+author: "Yuchen Zhang"
+date: '2023-03-24'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Library the required packages
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(data.table)
+
+library(Hmisc)
+library(haven)
+library(survival)		#Survival analysis
+library(survminer) 		#Survival analysis
+library(rms)
+library(survMisc)
+library(Greg)
+library(arsenal)
+```
+
+read in data
+
+```{r}
+date_cancer <- fread("/Users/yuchen/Desktop/UKBiobank/Data/update/date_cancer.csv", header=TRUE, sep=",")
+covar_0321 <- fread("/Users/yuchen/Desktop/UKBiobank/Data/update/covar_0321.csv", header=TRUE, sep=",")
+death_0321 <- fread("/Users/yuchen/Desktop/UKBiobank/Data/update/death_0321.csv", header=TRUE, sep=",")
+diet_n3 <- fread("/Users/yuchen/Desktop/UKBiobank/Data/update/diet_n3.csv", header=TRUE, sep=",")
+diet_n6 <- fread("/Users/yuchen/Desktop/UKBiobank/Data/update/diet_n6.csv", header=TRUE, sep=",")
+PUFA_plas_0321 <- fread("/Users/yuchen/Desktop/UKBiobank/Data/update/PUFA_plas_0321.csv", header=TRUE, sep=",")
+biomark <- fread("/Users/yuchen/Desktop/UKBiobank/Data/update/biomark.csv", header=TRUE, sep=",")
+first_date_CVD <- fread("/Users/yuchen/Desktop/UKBiobank/Data/update/first_date_CVD.csv", header=TRUE, sep=",")
+self_diabete <- fread("/Users/yuchen/Desktop/UKBiobank/Data/update/self_diabete.csv", header=TRUE, sep=",")
+self_hyper <- fread("/Users/yuchen/Desktop/UKBiobank/Data/update/self_hyper.csv", header=TRUE, sep=",")
+self_ill <- fread("/Users/yuchen/Desktop/UKBiobank/Data/update/self_ill.csv", header=TRUE, sep=",")
+
+total_diet1 <- fread("/Users/yuchen/Desktop/UKBiobank/Data/update/total_diet1.csv", header=TRUE, sep=",")
+total_diet2 <- fread("/Users/yuchen/Desktop/UKBiobank/Data/update/total_diet2.csv", header=TRUE, sep=",")
+
+death_0321 = death_0321 %>% rename(ID = f.eid)
+```
+
+Use mean of diet_n3 and diet_n6
+
+```{r}
+n3 = diet_n3 %>% select(-ID)
+diet_n3$diet_n3 = rowMeans(n3, na.rm = T) 
+diet_n3$diet_n3[is.nan(diet_n3$diet_n3)] = NA
+diet_n3 = diet_n3 %>% select(ID, diet_n3)
+
+n6 = diet_n6 %>% select(-ID)
+diet_n6$diet_n6 = rowMeans(n6, na.rm = T) 
+diet_n6$diet_n6[is.nan(diet_n6$diet_n6)] = NA
+diet_n6 = diet_n6 %>% select(ID, diet_n6)
+
+diet1 = total_diet1 %>% select(-ID)
+total_diet1$diet1m = rowMeans(diet1, na.rm = T) 
+total_diet1$diet1m[is.nan(total_diet1$diet1m)] = NA
+total_diet1 = total_diet1 %>% select(ID, diet1m)
+
+diet2 = total_diet2 %>% select(-ID)
+total_diet2$diet2m = rowMeans(diet2, na.rm = T) 
+total_diet2$diet2m[is.nan(total_diet2$diet2m)] = NA
+total_diet2 = total_diet2 %>% select(ID, diet2m)
+```
+
+Find those have CVD (First occurrence)
+
+```{r}
+first_date_CVD$num = rowSums(is.na(first_date_CVD))
+first_date_CVD2 = first_date_CVD[first_date_CVD$num != 77]
+first_date_CVD2 = first_date_CVD2 %>% select(-num)
+first_date_CVD2$date_min = apply(first_date_CVD2[,-1], 1, max, na.rm = T)
+date_CVD = first_date_CVD2 %>% select(ID, date_min) %>% rename(CVD_date = date_min)
+# Save the data
+#write.csv(date_CVD,file="/Users/yuchen/Desktop/UKBiobank/Data/update/date_CVD.csv",row.names = F)
+```
+
+Merge all the datasets
+
+```{r}
+fdata_0321 = covar_0321 %>% left_join(diet_n3, by = "ID")
+fdata_0321 = fdata_0321 %>% left_join(diet_n6, by = "ID")
+fdata_0321 = fdata_0321 %>% left_join(total_diet1, by = "ID")
+fdata_0321 = fdata_0321 %>% left_join(total_diet2, by = "ID")
+fdata_0321 = fdata_0321 %>% left_join(PUFA_plas_0321, by = "ID")
+fdata_0321 = fdata_0321 %>% left_join(biomark, by = "ID")
+fdata_0321 = fdata_0321 %>% left_join(date_CVD, by = "ID")
+fdata_0321 = fdata_0321 %>% left_join(date_cancer, by = "ID")
+fdata_0321 = fdata_0321 %>% left_join(self_diabete, by = "ID")
+fdata_0321 = fdata_0321 %>% left_join(self_hyper, by = "ID")
+fdata_0321 = fdata_0321 %>% left_join(self_ill, by = "ID")
+fdata_0321 = fdata_0321 %>% left_join(death_0321, by = "ID")
+
+fdata_0321 = fdata_0321 %>% select(-ethnicity, -eth_group)
+```
+
+Create the cormobidity covariate
+
+```{r}
+fdata_0321 = fdata_0321 %>% mutate(comorb = ifelse(diabet == 1 | hyperten == 1065 | ill == 1, 1, 0))
+fdata_0321$comorb[is.na(fdata_0321$comorb)] = 0
+```
+
+Death type and time interval
+
+```{r}
+# 2021-11-12 last death
+# Get the group of primary death cause information
+icd_initial = substr(fdata_0321$cause_of_death_primary,1,1)
+icd_num2 = substr(fdata_0321$cause_of_death_primary,2,3)
+fdata_0321 = fdata_0321 %>% mutate(icd_initial) %>% mutate(icd_num2)
+fdata_0321$icd_num2 = as.numeric(fdata_0321$icd_num2)
+
+fdata_0321 = fdata_0321 %>% 
+    mutate(death_cause_group = ifelse(icd_initial %in% c("A","B"),"01_infectious_parasitic",
+        ifelse(icd_initial == "C","02_Neoplasms",
+               # later I will modify D10-48 to 02_Neoplasms group
+            ifelse(icd_initial == "D","03_blood",
+                ifelse(icd_initial == "E","04_Endocrine_nutrition",
+                  ifelse(icd_initial == "F","05_Mental",
+                    ifelse(icd_initial == "G","06_nervous",
+                      ifelse(icd_initial == "H","08_ear",
+                        ifelse(icd_initial == "I","09_circulatory",
+                          ifelse(icd_initial == "J","10_respiratory",
+                            ifelse(icd_initial == "K","11_digestive",
+                              ifelse(icd_initial == "L","12_skin",
+                               ifelse(icd_initial == "M","13_musculoskeletal",
+                                 ifelse(icd_initial == "N","14_genitourinary",
+                                   ifelse(icd_initial == "O","15_Pregnancy",
+                                     ifelse(icd_initial == "Q","17_Congenital",
+                                       ifelse(icd_initial == "R","18_abnormal clinical",
+                                         ifelse(icd_initial %in% c("V","W","X","Y"),"20_External causes",
+                                           ifelse(icd_initial == "U","22_special_purposes",NA
+                                                                 )))))))))))))))))))
+# Change D10-48 to 02 group
+fdata_0321 = fdata_0321 %>% mutate(death_cause_group = ifelse(icd_initial == "D" & icd_num2 > 9 & icd_num2 < 49,"02_Neoplasms",death_cause_group))
+
+fdata_0321$CVD_date = as.Date(fdata_0321$CVD_date, "%Y-%m-%d")
+fdata_0321$cancer_date[is.na(fdata_0321$cancer_date)] = as.Date("2021-11-12", "%Y-%m-%d")
+fdata_0321$CVD_date[is.na(fdata_0321$CVD_date)] = as.Date("2021-11-12", "%Y-%m-%d")
+
+# Time interval
+fdata_0321$date_of_death[is.na(fdata_0321$date_of_death)] = as.Date("2021-11-12", "%Y-%m-%d")
+fdata_0321$time_to_death = as.numeric(difftime(fdata_0321$date_of_death, fdata_0321$base_date)) # in days
+fdata_0321$time_to_death_months = fdata_0321$time_to_death/30.417
+fdata_0321$time_to_death_years = fdata_0321$time_to_death/365.25
+
+# diet PUFA
+fdata_0321$total_facid = fdata_0321$diet1m + fdata_0321$diet2m + fdata_0321$diet_n3 + fdata_0321$diet_n6
+fdata_0321 = fdata_0321 %>% mutate(dietn3_pct = diet_n3/total_facid*100) %>% mutate(dietn6_pct = diet_n6/total_facid*100) %>% mutate(diet_ratio = diet_n6/diet_n3) 
+
+#fdata_0321$dietn3_pct[fdata_0321$dietn3_pct>25] = NA
+#fdata_0321$dietn6_pct[fdata_0321$dietn6_pct>52] = NA
+fdata_0321$diet_ratio[fdata_0321$diet_ratio>180] = NA
+```
+
+Summary of diet/plasma n-3
+```{r}
+# plasma n-3
+summary(fdata_0321$omega3_pct)
+```
+
+```{r}
+# plasma n-3
+summary(fdata_0321$dietn3_pct)
+```
+
+Summary of diet/plasma n-6
+
+```{r}
+# plasma n-6
+summary(fdata_0321$omega6_pct)
+```
+
+```{r}
+# plasma n-6
+summary(fdata_0321$dietn6_pct)
+```
+
+Summary of diet/plasma ratio (6/3)
+
+```{r}
+# plasma n-3
+summary(fdata_0321$omega_ratio)
+```
+
+```{r}
+# plasma n-3
+summary(fdata_0321$diet_ratio)
+```
+
+
+## Flowchart of the study population
+
+Step 1: had cancer at baseline
+
+```{r}
+data1 = fdata_0321 %>% filter(cancer_date >= base_date) # 464648 (-37736)
+```
+
+Step 2: had CVD at baseline
+
+```{r}
+data2 = data1 %>% filter(CVD_date >= base_date) # 363676 (-100972)
+```
+
+Step 3: loss to follow up
+
+```{r}
+data3 = data2 %>% filter(is.na(Lost_follow_up) == TRUE) # 362797 (-879)
+```
+
+Step 4: Missing information on plasma PUFA
+
+```{r}
+data4 = data3 %>% filter(is.na(omega_ratio) == FALSE) # 85425 (-277372)
+```
+
+Step 4 for dietary data
+```{r}
+data4_2 = data3 %>% filter(is.na(diet_ratio) == FALSE) # 153064 (-209733)
+```
+
+Add event status
+
+```{r}
+data_f = data4 %>% mutate(death = ifelse(is.na(cause_of_death_primary) == TRUE, 0, 1)) %>% mutate(death_cancer = ifelse(death_cause_group == "02_Neoplasms", 1, 0)) %>% mutate(death_cvd = ifelse(death_cause_group == "09_circulatory", 1, 0)) 
+data_f$death_cancer[is.na(data_f$death_cancer)==TRUE] = 0
+data_f$death_cvd[is.na(data_f$death_cvd)==TRUE] = 0
+```
+
+## Some basic summary
+
+median of follow-up
+
+```{r}
+median(data_f$time_to_death_years)
+```
+
+total death nums
+
+```{r}
+sum(data_f$death)
+```
+
+cancer death nums
+
+```{r}
+sum(data_f$death_cancer)
+```
+
+cvd death nums
+
+```{r}
+sum(data_f$death_cvd)
+```
+
+```{r}
+data_f = data_f %>% mutate(omega3_pctg = ntile(omega3_pct, 5))
+data_f = data_f %>% mutate(omega6_pctg = ntile(omega6_pct, 5))
+data_f = data_f %>% mutate(omega_ratiog = ntile(omega_ratio, 5))
+```
+
+```{r}
+data_f = data_f %>% mutate(diet3_pctg = ntile(dietn3_pct, 5))
+data_f = data_f %>% mutate(diet6_pctg = ntile(dietn6_pct, 5))
+data_f = data_f %>% mutate(dietr_g = ntile(diet_ratio, 5))
+
+#data_f = data_f %>% mutate(diet3_g = ntile(diet_n3, 5))
+#data_f = data_f %>% mutate(diet6_g = ntile(diet_n6, 5))
+```
+
+LA and DHA
+```{r}
+data_f = data_f %>% mutate(LA_g = ntile(LA_pct, 5))
+data_f = data_f %>% mutate(DHA_g = ntile(DHA_pct, 5))
+```
+
+plasma PUFA
+```{r}
+sum_3 = data_f %>% group_by(omega3_pctg) %>% summarise(med = median(omega3_pct))
+sum_3
+```
+
+```{r}
+sum_6 = data_f %>% group_by(omega6_pctg) %>% summarise(med = median(omega6_pct))
+sum_6
+```
+
+```{r}
+sum_ratio = data_f %>% group_by(omega_ratiog) %>% summarise(med = median(omega_ratio))
+sum_ratio
+```
+
+summary of the diet PUFA
+
+```{r}
+data_f %>% group_by(diet3_pctg) %>% summarise(med = median(dietn3_pct))
+```
+
+
+```{r}
+data_f %>% group_by(diet6_pctg) %>% summarise(med = median(dietn6_pct))
+```
+
+
+```{r}
+data_f %>% group_by(dietr_g) %>% summarise(med = median(diet_ratio))
+```
+Frequency table of the death in each diet PUFA quintiles
+
+diet_n3_pct and mortality
+```{r}
+data_f %>% dplyr::group_by(diet3_pctg) %>% dplyr::summarize(sum_all = sum(death, na.rm = TRUE), sum_cancer = sum(death_cancer, na.rm = TRUE), sum_cvd = sum(death_cvd, na.rm = TRUE))
+```
+diet_n6_pct and mortality
+```{r}
+data_f %>% dplyr::group_by(diet6_pctg) %>% dplyr::summarize(sum_all = sum(death, na.rm = TRUE), sum_cancer = sum(death_cancer, na.rm = TRUE), sum_cvd = sum(death_cvd, na.rm = TRUE))
+```
+diet_ratio and mortality
+```{r}
+data_f %>% dplyr::group_by(dietr_g) %>% dplyr::summarize(sum_all = sum(death, na.rm = TRUE), sum_cancer = sum(death_cancer, na.rm = TRUE), sum_cvd = sum(death_cvd, na.rm = TRUE))
+```
+
+
+```{r}
+data_f = data_f %>% mutate(omega3_m = ifelse(omega3_pctg == 1, 2.6628,
+                                                 ifelse(omega3_pctg == 2, 3.5021,
+                                                        ifelse(omega3_pctg == 3, 4.1583,
+                                                               ifelse(omega3_pctg == 4, 4.9119, 
+                                                                      ifelse(omega3_pctg == 5, 6.3097, NA))))))
+
+data_f = data_f %>% mutate(omega6_m = ifelse(omega6_pctg == 1, 33.335,
+                                                 ifelse(omega6_pctg == 2, 36.768,
+                                                        ifelse(omega6_pctg == 3, 38.737,
+                                                               ifelse(omega6_pctg == 4, 40.371, 
+                                                                      ifelse(omega6_pctg == 5, 42.368, NA))))))
+
+data_f = data_f %>% mutate(omegar_m = ifelse(omega_ratiog == 1, 5.8516,
+                                                 ifelse(omega_ratiog  == 2, 7.6221,
+                                                        ifelse(omega_ratiog  == 3, 9.1420,
+                                                               ifelse(omega_ratiog  == 4, 11.0140, 
+                                                                      ifelse(omega_ratiog  == 5, 14.8110, NA))))))
+```
+
+```{r}
+data_f$Fish_oil_baseline = as.factor(data_f$Fish_oil_baseline)
+data_f$Alcohol_status = as.factor(data_f$Alcohol_status)
+data_f$Smoking_status =as.factor(data_f$Smoking_status)
+data_f$IPAQ_activity = as.factor(data_f$IPAQ_activity)
+data_f$sex = as.factor(data_f$sex)
+data_f$center = as.factor(data_f$center)
+data_f$comorb = as.factor(data_f$comorb)
+data_f$omega3_pctg = as.factor(data_f$omega3_pctg)
+data_f$omega6_pctg = as.factor(data_f$omega6_pctg)
+data_f$omega_ratiog = as.factor(data_f$omega_ratiog)
+
+data_f$diet3_pctg = as.factor(data_f$diet3_pctg)
+data_f$diet6_pctg = as.factor(data_f$diet6_pctg)
+data_f$dietr_g = as.factor(data_f$dietr_g)
+data_f$diet3_g = as.factor(data_f$diet3_g)
+data_f$diet6_g = as.factor(data_f$diet6_g)
+
+data_f$LA_g = as.factor(data_f$LA_g)
+data_f$DHA_g = as.factor(data_f$DHA_g)
+```
+
+```{r}
+# Save the data
+write.csv(data_f,file="/Users/yuchen/Desktop/UKBiobank/Data/update/data_f.csv",row.names = F)
+```
+
+|             |
+|:------------|
+| Omega-3 pct |
+
+## Main analysis
+
+```{r}
+data_f %>% group_by(omega3_pctg) %>% dplyr::summarize(sum_all = sum(death, na.rm = TRUE), sum_cancer = sum(death_cancer, na.rm = TRUE), sum_cvd = sum(death_cvd, na.rm = TRUE))
+```
+
+#### Minimum adjusted
+
+Continuous
+
+```{r}
+fit_3_con_m = summary(coxph(formula = Surv(time_to_death_months, death)~ omega3_pct + age + TDI + eth_group_new + sex + center, data = data_f))
+contin = as.data.frame(fit_3_con_m$conf.int)[1,-2]
+contin = round(contin,2)
+contin$cofint = paste(contin$`exp(coef)`," (",contin$`lower .95`,"-",contin$`upper .95`,")", sep = "")
+print(contin$cofint)
+```
+
+Category
+
+```{r}
+fit_3_cat_m = summary(coxph(formula = Surv(time_to_death_months, death)~ omega3_pctg + age + TDI + eth_group_new + sex + center, data = data_f))
+contin = as.data.frame(fit_3_cat_m$conf.int)[1:4,-2]
+contin = round(contin,2)
+contin$cofint = paste(contin$`exp(coef)`," (",contin$`lower .95`,"-",contin$`upper .95`,")", sep = "")
+print(contin$cofint)
+```
+
+For trend
+
+```{r}
+fit_3_trd_m = summary(coxph(formula = Surv(time_to_death_months, death)~ omega3_m + age + TDI + eth_group_new + sex + center, data = data_f))
+p_val = fit_3_trd_m$coefficients[1,5]
+p_val = round(p_val,2)
+print(p_val)
+```
+
+#### Fully adjusted
+
+-   BMI + Smoking_status + Alcohol_status + IPAQ_activity + comorb
+
+Continuous
+
+```{r}
+fit_3_con_f = summary(coxph(formula = Surv(time_to_death_months, death)~ omega3_pct + age + TDI + eth_group_new + sex + center + BMI + Smoking_status + Alcohol_status + IPAQ_activity + comorb, data = data_f))
+contin = as.data.frame(fit_3_con_f$conf.int)[1,-2]
+contin = round(contin,2)
+contin$cofint = paste(contin$`exp(coef)`," (",contin$`lower .95`,"-",contin$`upper .95`,")", sep = "")
+print(contin$cofint)
+```
+
+Category
+
+```{r}
+fit_3_cat_f = summary(coxph(formula = Surv(time_to_death_months, death)~ omega3_pctg + age + TDI + eth_group_new + sex + center + BMI + Smoking_status + Alcohol_status + IPAQ_activity + comorb, data = data_f))
+contin = as.data.frame(fit_3_cat_f$conf.int)[1:4,-2]
+contin = round(contin,2)
+contin$cofint = paste(contin$`exp(coef)`," (",contin$`lower .95`,"-",contin$`upper .95`,")", sep = "")
+print(contin$cofint)
+```
+
+For trend
+
+```{r}
+fit_3_trd_f = summary(coxph(formula = Surv(time_to_death_months, death)~ omega3_m + age + TDI + eth_group_new + sex + center + BMI + Smoking_status + Alcohol_status + IPAQ_activity + comorb, data = data_f))
+p_val = fit_3_trd_f$coefficients[1,5]
+p_val = round(p_val,2)
+print(p_val)
+```
+
+|             |
+|:------------|
+| Omega-6 pct |
+
+## Main analysis
+
+```{r}
+data_f %>% group_by(omega6_pctg) %>% dplyr::summarize(sum_all = sum(death, na.rm = TRUE), sum_cancer = sum(death_cancer, na.rm = TRUE), sum_cvd = sum(death_cvd, na.rm = TRUE))
+```
+
+#### Minimum adjusted
+
+Continuous
+
+```{r}
+fit_6_con_m = summary(coxph(formula = Surv(time_to_death_months, death)~ omega6_pct + age + TDI + eth_group_new + sex + center, data = data_f))
+contin = as.data.frame(fit_6_con_m$conf.int)[1,-2]
+contin = round(contin,2)
+contin$cofint = paste(contin$`exp(coef)`," (",contin$`lower .95`,"-",contin$`upper .95`,")", sep = "")
+print(contin$cofint)
+```
+
+Category
+
+```{r}
+fit_6_cat_m = summary(coxph(formula = Surv(time_to_death_months, death)~ omega6_pctg + age + TDI + eth_group_new + sex + center, data = data_f))
+contin = as.data.frame(fit_6_cat_m$conf.int)[1:4,-2]
+contin = round(contin,2)
+contin$cofint = paste(contin$`exp(coef)`," (",contin$`lower .95`,"-",contin$`upper .95`,")", sep = "")
+print(contin$cofint)
+```
+
+For trend
+
+```{r}
+fit_6_trd_m = summary(coxph(formula = Surv(time_to_death_months, death)~ omega6_m + age + TDI + eth_group_new + sex + center, data = data_f))
+p_val = fit_6_trd_m$coefficients[1,5]
+p_val = round(p_val,2)
+print(p_val)
+```
+
+#### Fully adjusted
+
+-   BMI + Smoking_status + Alcohol_status + IPAQ_activity + comorb
+
+Continuous
+
+```{r}
+fit_6_con_f = summary(coxph(formula = Surv(time_to_death_months, death)~ omega6_pct + age + TDI + eth_group_new + sex + center + BMI + Smoking_status + Alcohol_status + IPAQ_activity + comorb, data = data_f))
+contin = as.data.frame(fit_6_con_f$conf.int)[1,-2]
+contin = round(contin,2)
+contin$cofint = paste(contin$`exp(coef)`," (",contin$`lower .95`,"-",contin$`upper .95`,")", sep = "")
+print(contin$cofint)
+```
+
+Category
+
+```{r}
+fit_6_cat_f = summary(coxph(formula = Surv(time_to_death_months, death)~ omega6_pctg + age + TDI + eth_group_new + sex + center + BMI + Smoking_status + Alcohol_status + IPAQ_activity + comorb, data = data_f))
+contin = as.data.frame(fit_6_cat_f$conf.int)[1:4,-2]
+contin = round(contin,2)
+contin$cofint = paste(contin$`exp(coef)`," (",contin$`lower .95`,"-",contin$`upper .95`,")", sep = "")
+print(contin$cofint)
+```
+
+For trend
+
+```{r}
+fit_6_trd_f = summary(coxph(formula = Surv(time_to_death_months, death)~ omega6_m + age + TDI + eth_group_new + sex + center + BMI + Smoking_status + Alcohol_status + IPAQ_activity + comorb, data = data_f))
+p_val = fit_6_trd_f$coefficients[1,5]
+p_val = round(p_val,2)
+print(p_val)
+```
+
+|                 |
+|:----------------|
+| Omega-ratio 6/3 |
+
+## Main analysis
+
+```{r}
+data_f %>% group_by(omega_ratiog) %>% dplyr::summarize(sum_all = sum(death, na.rm = TRUE), sum_cancer = sum(death_cancer, na.rm = TRUE), sum_cvd = sum(death_cvd, na.rm = TRUE))
+```
+
+#### Minimum adjusted
+
+Continuous
+
+```{r}
+fit_r_con_m = summary(coxph(formula = Surv(time_to_death_months, death_cvd)~ omega_ratio + age + TDI + eth_group_new + sex + center, data = data_f))
+contin = as.data.frame(fit_r_con_m$conf.int)[1,-2]
+contin = round(contin,2)
+contin$cofint = paste(contin$`exp(coef)`," (",contin$`lower .95`,"-",contin$`upper .95`,")", sep = "")
+print(contin$cofint)
+```
+
+Category
+
+```{r}
+fit_r_cat_m = summary(coxph(formula = Surv(time_to_death_months, death_cvd)~ omega_ratiog + age + TDI + eth_group_new + sex + center, data = data_f))
+contin = as.data.frame(fit_r_cat_m$conf.int)[1:4,-2]
+contin = round(contin,2)
+contin$cofint = paste(contin$`exp(coef)`," (",contin$`lower .95`,"-",contin$`upper .95`,")", sep = "")
+print(contin$cofint)
+```
+
+For trend
+
+```{r}
+fit_r_trd_m = summary(coxph(formula = Surv(time_to_death_months, death_cvd)~ omegar_m + age + TDI + eth_group_new + sex + center, data = data_f))
+p_val = fit_r_trd_m$coefficients[1,5]
+
+print(p_val)
+```
+
+#### Fully adjusted
+
+-   BMI + Smoking_status + Alcohol_status + IPAQ_activity + comorb
+
+Continuous
+
+```{r}
+fit_r_con_f = summary(coxph(formula = Surv(time_to_death_months, death_cvd)~ omega_ratio + age + TDI + eth_group_new + sex + center + BMI + Smoking_status + Alcohol_status + IPAQ_activity + comorb, data = data_f))
+contin = as.data.frame(fit_r_con_f$conf.int)[1,-2]
+contin = round(contin,2)
+contin$cofint = paste(contin$`exp(coef)`," (",contin$`lower .95`,"-",contin$`upper .95`,")", sep = "")
+print(contin$cofint)
+```
+
+Category
+
+```{r}
+fit_r_cat_f = summary(coxph(formula = Surv(time_to_death_months, death_cvd)~ omega_ratiog + age + TDI + eth_group_new + sex + center + BMI + Smoking_status + Alcohol_status + IPAQ_activity + comorb, data = data_f))
+contin = as.data.frame(fit_r_cat_f$conf.int)[1:4,-2]
+contin = round(contin,2)
+contin$cofint = paste(contin$`exp(coef)`," (",contin$`lower .95`,"-",contin$`upper .95`,")", sep = "")
+print(contin$cofint)
+```
+
+For trend
+
+```{r}
+fit_r_trd_f = summary(coxph(formula = Surv(time_to_death_months, death_cvd)~ omegar_m + age + TDI + eth_group_new + sex + center + BMI + Smoking_status + Alcohol_status + IPAQ_activity + comorb, data = data_f))
+p_val = fit_r_trd_f$coefficients[1,5]
+
+print(p_val)
+```
