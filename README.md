@@ -17,3 +17,13 @@ The datasets analyzed during the current study are available from the UK Biobank
 ## R scripts
 All scripts and models were deposited in this repository.
 
+## Citations
+```
+@article{Yuchen2024mortaity,
+    title   = {Higher ratio of plasma omega-6/omega-3 fatty acids is associated with greater risk of all-cause, cancer, and cardiovascular mortality: aA population-based cohort study in UK Biobank},
+    author  = {Yuchen Zhang, Yitang Sun, Qi Yu, Suhang Song, J Thomas Brenna, Ye Shen, and Kaixiong Ye},
+    journal = {eLife},
+    year    = {2024},
+    DOI = {https://doi.org/10.7554/eLife.90132.3}
+}
+```
